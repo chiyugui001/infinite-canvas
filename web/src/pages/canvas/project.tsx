@@ -8,6 +8,7 @@ import { useTranslation } from "react-i18next";
 import { requestEdit, requestGeneration, requestImageQuestion } from "@/services/api/image";
 import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audio";
 import { requestVideoGeneration, storeGeneratedVideo } from "@/services/api/video";
+import { resumeDreaminaImages } from "@/services/api/dreamina";
 import { defaultConfig, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
 import { uploadImage } from "@/services/image-storage";
 import { uploadMediaFile } from "@/services/file-storage";
@@ -250,6 +251,8 @@ function InfiniteCanvasPage() {
     const selectionBoxRef = useRef(selectionBox);
     const pendingConnectionCreateRef = useRef(pendingConnectionCreate);
     const generationRequestsRef = useRef(new Map<string, CanvasGenerationRequest>());
+    const resumingDreaminaTasksRef = useRef(new Set<string>());
+    const dreaminaResumeScanProjectRef = useRef<string | null>(null);
 
     const createHistoryEntry = useCallback(
         (): CanvasHistoryEntry => ({
@@ -358,6 +361,93 @@ function InfiniteCanvasPage() {
         if (!projectLoaded || !["new", "recent", "choose"].includes(searchParams.get("mode") || "")) return;
         if (!searchParams.has("agentUrl")) openAgentPanel();
     }, [openAgentPanel, projectLoaded, searchParams]);
+
+    useEffect(() => {
+        if (!localAgentConnected) {
+            dreaminaResumeScanProjectRef.current = null;
+            return;
+        }
+        if (!projectLoaded || dreaminaResumeScanProjectRef.current === projectId) return;
+        dreaminaResumeScanProjectRef.current = projectId;
+        for (const node of nodes) {
+            const nodeSubmitId = node.metadata?.dreaminaSubmitId;
+            if (nodeSubmitId) {
+                const resumeKey = `${projectId}:${node.id}:${nodeSubmitId}`;
+                if (!resumingDreaminaTasksRef.current.has(resumeKey)) {
+                    resumingDreaminaTasksRef.current.add(resumeKey);
+                    void resumeDreaminaImages(nodeSubmitId, { onProgress: (progress) => setNodes((prev) => prev.map((item) => item.id === node.id ? { ...item, metadata: { ...item.metadata, dreaminaProgress: progress } } : item)) })
+                        .then(async (results) => {
+                            const dataUrl = results[0];
+                            if (!dataUrl) throw new Error(t("dreamina.noMedia"));
+                            const uploaded = await uploadImage(dataUrl);
+                            const imageConfig = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
+                            const imageSize = fitNodeSize(uploaded.width, uploaded.height, imageConfig.width, imageConfig.height);
+                            setNodes((prev) => prev.map((item) => {
+                                if (item.id !== node.id) return item;
+                                const center = { x: item.position.x + item.width / 2, y: item.position.y + item.height / 2 };
+                                const existingImages = item.metadata?.images || [];
+                                const completedId = item.metadata?.primaryImageId || existingImages[0]?.id || nanoid();
+                                const completed: CanvasNodeImage = { id: completedId, status: NODE_STATUS_SUCCESS, content: uploaded.url, storageKey: uploaded.storageKey, naturalWidth: uploaded.width, naturalHeight: uploaded.height, bytes: uploaded.bytes, mimeType: uploaded.mimeType };
+                                return { ...item, position: { x: center.x - imageSize.width / 2, y: center.y - imageSize.height / 2 }, ...imageSize, metadata: { ...item.metadata, ...imageMetadata(uploaded), ...(existingImages.length ? { images: [completed, ...existingImages.slice(1)] } : {}), primaryImageId: completedId, dreaminaSubmitId: undefined, dreaminaProgress: undefined, errorDetails: undefined } };
+                            }));
+                        })
+                        .catch((error) => {
+                            if (isGenerationCanceled(error)) return;
+                            const errorDetails = error instanceof Error ? error.message : t("canvas.projectPage.generationFailed");
+                            setNodes((prev) => prev.map((item) => item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_ERROR, errorDetails } } : item));
+                        })
+                        .finally(() => resumingDreaminaTasksRef.current.delete(resumeKey));
+                }
+            }
+            for (const image of node.metadata?.images || []) {
+                const submitId = image.dreaminaSubmitId;
+                if (!submitId || image.content) continue;
+                const resumeKey = `${projectId}:${node.id}:${image.id}:${submitId}`;
+                if (resumingDreaminaTasksRef.current.has(resumeKey)) continue;
+                resumingDreaminaTasksRef.current.add(resumeKey);
+                void resumeDreaminaImages(submitId, { onProgress: (progress) => setNodes((prev) => prev.map((item) => item.id === node.id ? { ...item, metadata: { ...item.metadata, dreaminaProgress: progress, images: item.metadata?.images?.map((current) => current.id === image.id ? { ...current, dreaminaProgress: progress } : current) } } : item)) })
+                    .then(async (results) => {
+                        const dataUrl = results[0];
+                        if (!dataUrl) throw new Error(t("dreamina.noMedia"));
+                        const uploaded = await uploadImage(dataUrl);
+                        const imageConfig = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
+                        const imageSize = fitNodeSize(uploaded.width, uploaded.height, imageConfig.width, imageConfig.height);
+                        const completed: CanvasNodeImage = { id: image.id, status: NODE_STATUS_SUCCESS, content: uploaded.url, storageKey: uploaded.storageKey, naturalWidth: uploaded.width, naturalHeight: uploaded.height, bytes: uploaded.bytes, mimeType: uploaded.mimeType };
+                        setNodes((prev) => prev.map((item) => {
+                            if (item.id !== node.id) return item;
+                            const images = item.metadata?.images?.map((current) => current.id === image.id ? completed : current) || [];
+                            const center = { x: item.position.x + item.width / 2, y: item.position.y + item.height / 2 };
+                            return {
+                                ...item,
+                                position: item.metadata?.primaryImageId ? item.position : { x: center.x - imageSize.width / 2, y: center.y - imageSize.height / 2 },
+                                width: item.metadata?.primaryImageId ? item.width : imageSize.width,
+                                height: item.metadata?.primaryImageId ? item.height : imageSize.height,
+                                metadata: {
+                                    ...item.metadata,
+                                    content: item.metadata?.content || completed.content,
+                                    storageKey: item.metadata?.storageKey || completed.storageKey,
+                                    naturalWidth: item.metadata?.naturalWidth || completed.naturalWidth,
+                                    naturalHeight: item.metadata?.naturalHeight || completed.naturalHeight,
+                                    bytes: item.metadata?.bytes || completed.bytes,
+                                    mimeType: item.metadata?.mimeType || completed.mimeType,
+                                    images,
+                                    primaryImageId: item.metadata?.primaryImageId || completed.id,
+                                    status: NODE_STATUS_SUCCESS,
+                                    dreaminaProgress: undefined,
+                                    errorDetails: undefined,
+                                },
+                            };
+                        }));
+                    })
+                    .catch((error) => {
+                        if (isGenerationCanceled(error)) return;
+                        const errorDetails = error instanceof Error ? error.message : t("canvas.projectPage.generationFailed");
+                        setNodes((prev) => prev.map((item) => item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_ERROR, errorDetails, images: item.metadata?.images?.map((current) => current.id === image.id ? { ...current, status: NODE_STATUS_ERROR, errorDetails } : current) } } : item));
+                    })
+                    .finally(() => resumingDreaminaTasksRef.current.delete(resumeKey));
+            }
+        }
+    }, [localAgentConnected, nodes, projectId, projectLoaded, t]);
 
     useEffect(() => {
         if (!projectLoaded || applyingHistoryRef.current || historyPausedRef.current) return;
@@ -1715,10 +1805,10 @@ function InfiniteCanvasPage() {
             setDialogNodeId(childId);
             const controller = startGenerationRequest(childId, node.id, childId);
             try {
-                const image = await requestEdit(generationConfig, prompt, [source], { id: `${node.id}-mask`, name: "mask.png", type: "image/png", dataUrl: payload.maskDataUrl }, { signal: controller.signal }).then((items) => items[0]);
+                const image = await requestEdit(generationConfig, prompt, [source], { id: `${node.id}-mask`, name: "mask.png", type: "image/png", dataUrl: payload.maskDataUrl }, { signal: controller.signal, onDreaminaTask: (submitId) => setNodes((prev) => prev.map((item) => item.id === childId ? { ...item, metadata: { ...item.metadata, dreaminaSubmitId: submitId } } : item)), onDreaminaProgress: (progress) => setNodes((prev) => prev.map((item) => item.id === childId ? { ...item, metadata: { ...item.metadata, dreaminaProgress: progress } } : item)) }).then((items) => items[0]);
                 const uploaded = await uploadImage(image.dataUrl);
                 const size = fitNodeSize(uploaded.width, uploaded.height, node.width, node.height);
-                setNodes((prev) => prev.map((item) => (item.id === childId ? { ...item, width: size.width, height: size.height, metadata: { ...item.metadata, ...imageMetadata(uploaded), prompt, ...generationMetadata } } : item)));
+                setNodes((prev) => prev.map((item) => (item.id === childId ? { ...item, width: size.width, height: size.height, metadata: { ...item.metadata, ...imageMetadata(uploaded), prompt, ...generationMetadata, dreaminaSubmitId: undefined, dreaminaProgress: undefined, errorDetails: undefined } } : item)));
             } catch (error) {
                 if (isGenerationCanceled(error)) return;
                 const errorDetails = error instanceof Error ? error.message : t("canvas.projectPage.maskFailed");
@@ -1796,11 +1886,11 @@ function InfiniteCanvasPage() {
                     prompt,
                     [{ id: node.id, name: `${node.title || node.id}.png`, type: node.metadata.mimeType || "image/png", dataUrl: node.metadata.content, storageKey: node.metadata.storageKey }],
                     undefined,
-                    { signal: controller.signal },
+                    { signal: controller.signal, onDreaminaTask: (submitId) => setNodes((prev) => prev.map((item) => item.id === childId ? { ...item, metadata: { ...item.metadata, dreaminaSubmitId: submitId } } : item)), onDreaminaProgress: (progress) => setNodes((prev) => prev.map((item) => item.id === childId ? { ...item, metadata: { ...item.metadata, dreaminaProgress: progress } } : item)) },
                 ).then((items) => items[0]);
                 const uploaded = await uploadImage(image.dataUrl);
                 const size = fitNodeSize(uploaded.width, uploaded.height, imageConfig.width, imageConfig.height);
-                setNodes((prev) => prev.map((item) => (item.id === childId ? { ...item, width: size.width, height: size.height, metadata: { ...item.metadata, ...imageMetadata(uploaded), prompt, ...generationMetadata } } : item)));
+                setNodes((prev) => prev.map((item) => (item.id === childId ? { ...item, width: size.width, height: size.height, metadata: { ...item.metadata, ...imageMetadata(uploaded), prompt, ...generationMetadata, dreaminaSubmitId: undefined, dreaminaProgress: undefined, errorDetails: undefined } } : item)));
             } catch (error) {
                 if (isGenerationCanceled(error)) return;
                 const errorDetails = error instanceof Error ? error.message : t("canvas.projectPage.generationFailed");
@@ -2027,11 +2117,11 @@ function InfiniteCanvasPage() {
                             : [],
                     );
                     const image = refs.length
-                        ? await requestEdit({ ...generationConfig, count: "1" }, fullPrompt, refs, undefined, { signal: controller.signal }).then((items) => items[0])
-                        : await requestGeneration({ ...generationConfig, count: "1" }, fullPrompt, { signal: controller.signal }).then((items) => items[0]);
+                        ? await requestEdit({ ...generationConfig, count: "1" }, fullPrompt, refs, undefined, { signal: controller.signal, onDreaminaTask: (submitId) => setNodes((prev) => prev.map((item) => item.id === nodeId ? { ...item, metadata: { ...item.metadata, dreaminaSubmitId: submitId } } : item)), onDreaminaProgress: (progress) => setNodes((prev) => prev.map((item) => item.id === nodeId ? { ...item, metadata: { ...item.metadata, dreaminaProgress: progress } } : item)) }).then((items) => items[0])
+                        : await requestGeneration({ ...generationConfig, count: "1" }, fullPrompt, { signal: controller.signal, onDreaminaTask: (submitId) => setNodes((prev) => prev.map((item) => item.id === nodeId ? { ...item, metadata: { ...item.metadata, dreaminaSubmitId: submitId } } : item)), onDreaminaProgress: (progress) => setNodes((prev) => prev.map((item) => item.id === nodeId ? { ...item, metadata: { ...item.metadata, dreaminaProgress: progress } } : item)) }).then((items) => items[0]);
                     const uploaded = await uploadImage(image.dataUrl);
                     setNodes((prev) =>
-                        prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, ...imageMetadata(uploaded), prompt: scene, model: generationConfig.model, status: NODE_STATUS_SUCCESS, errorDetails: undefined } } : node)),
+                        prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, ...imageMetadata(uploaded), prompt: scene, model: generationConfig.model, status: NODE_STATUS_SUCCESS, dreaminaSubmitId: undefined, dreaminaProgress: undefined, errorDetails: undefined } } : node)),
                     );
                     setDialogNodeId(null);
                 } catch (error) {
@@ -2152,8 +2242,8 @@ function InfiniteCanvasPage() {
                         imageIds.map(async (imageId) => {
                             try {
                                 const image = referenceImages.length
-                                    ? await requestEdit({ ...generationConfig, count: "1" }, effectivePrompt, referenceImages, undefined, { signal: controller.signal }).then((items) => items[0])
-                                    : await requestGeneration({ ...generationConfig, count: "1" }, effectivePrompt, { signal: controller.signal }).then((items) => items[0]);
+                                    ? await requestEdit({ ...generationConfig, count: "1" }, effectivePrompt, referenceImages, undefined, { signal: controller.signal, onDreaminaTask: (submitId) => setNodes((prev) => prev.map((node) => node.id === rootId ? { ...node, metadata: { ...node.metadata, images: node.metadata?.images?.map((current) => current.id === imageId ? { ...current, dreaminaSubmitId: submitId } : current) } } : node)), onDreaminaProgress: (progress) => setNodes((prev) => prev.map((node) => node.id === rootId ? { ...node, metadata: { ...node.metadata, dreaminaProgress: progress, images: node.metadata?.images?.map((current) => current.id === imageId ? { ...current, dreaminaProgress: progress } : current) } } : node)) }).then((items) => items[0])
+                                    : await requestGeneration({ ...generationConfig, count: "1" }, effectivePrompt, { signal: controller.signal, onDreaminaTask: (submitId) => setNodes((prev) => prev.map((node) => node.id === rootId ? { ...node, metadata: { ...node.metadata, images: node.metadata?.images?.map((current) => current.id === imageId ? { ...current, dreaminaSubmitId: submitId } : current) } } : node)), onDreaminaProgress: (progress) => setNodes((prev) => prev.map((node) => node.id === rootId ? { ...node, metadata: { ...node.metadata, dreaminaProgress: progress, images: node.metadata?.images?.map((current) => current.id === imageId ? { ...current, dreaminaProgress: progress } : current) } } : node)) }).then((items) => items[0]);
                                 const uploaded = await uploadImage(image.dataUrl);
                                 const imageSize = fitNodeSize(uploaded.width, uploaded.height, imageConfig.width, imageConfig.height);
                                 const item: CanvasNodeImage = { id: imageId, status: NODE_STATUS_SUCCESS, content: uploaded.url, storageKey: uploaded.storageKey, naturalWidth: uploaded.width, naturalHeight: uploaded.height, bytes: uploaded.bytes, mimeType: uploaded.mimeType };
@@ -2205,9 +2295,9 @@ function InfiniteCanvasPage() {
                     setNodes((prev) =>
                         prev.map((node) =>
                             node.id === nodeId && isConfigNode
-                                ? { ...node, metadata: { ...node.metadata, status: hasSuccess ? NODE_STATUS_SUCCESS : NODE_STATUS_ERROR, errorDetails: hasSuccess ? undefined : t("canvas.projectPage.generationFailed") } }
+                                ? { ...node, metadata: { ...node.metadata, status: hasSuccess ? NODE_STATUS_SUCCESS : NODE_STATUS_ERROR, dreaminaProgress: undefined, errorDetails: hasSuccess ? undefined : t("canvas.projectPage.generationFailed") } }
                                 : node.id === rootId
-                                  ? { ...node, metadata: { ...node.metadata, status: hasSuccess ? NODE_STATUS_SUCCESS : NODE_STATUS_ERROR, errorDetails: hasSuccess ? undefined : t("canvas.projectPage.allFailed") } }
+                                  ? { ...node, metadata: { ...node.metadata, status: hasSuccess ? NODE_STATUS_SUCCESS : NODE_STATUS_ERROR, dreaminaProgress: undefined, errorDetails: hasSuccess ? undefined : t("canvas.projectPage.allFailed") } }
                                     : node,
                         ),
                     );
@@ -2487,8 +2577,8 @@ function InfiniteCanvasPage() {
                 }
 
                 const image = useReferenceImages
-                    ? await requestEdit(generationConfig, prompt, retryImages, undefined, { signal: controller.signal }).then((items) => items[0])
-                    : await requestGeneration(generationConfig, prompt, { signal: controller.signal }).then((items) => items[0]);
+                    ? await requestEdit(generationConfig, prompt, retryImages, undefined, { signal: controller.signal, onDreaminaTask: (submitId) => setNodes((prev) => prev.map((item) => item.id === node.id ? { ...item, metadata: { ...item.metadata, dreaminaSubmitId: submitId } } : item)), onDreaminaProgress: (progress) => setNodes((prev) => prev.map((item) => item.id === node.id ? { ...item, metadata: { ...item.metadata, dreaminaProgress: progress } } : item)) }).then((items) => items[0])
+                    : await requestGeneration(generationConfig, prompt, { signal: controller.signal, onDreaminaTask: (submitId) => setNodes((prev) => prev.map((item) => item.id === node.id ? { ...item, metadata: { ...item.metadata, dreaminaSubmitId: submitId } } : item)), onDreaminaProgress: (progress) => setNodes((prev) => prev.map((item) => item.id === node.id ? { ...item, metadata: { ...item.metadata, dreaminaProgress: progress } } : item)) }).then((items) => items[0]);
                 const uploadedImage = await uploadImage(image.dataUrl);
                 const imageConfig = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
                 const retryImage: CanvasNodeImage = {
@@ -2529,6 +2619,9 @@ function InfiniteCanvasPage() {
                                 primaryImageId: makePrimary ? retryImage.id : item.metadata?.primaryImageId,
                                 prompt,
                                 ...generationMetadata,
+                                dreaminaSubmitId: undefined,
+                                dreaminaProgress: undefined,
+                                errorDetails: undefined,
                             },
                         };
                     }),

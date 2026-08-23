@@ -593,6 +593,7 @@ function toolInputRows(tool: string, input: unknown) {
     if (tool === "canvas_create_text_node") return [textRow("文本内容", field(input, "text"))].filter(Boolean);
     if (tool === "canvas_apply_ops") return [textRow("操作内容", summarizeCanvasOps(arrayValue(field(input, "ops"))))].filter(Boolean);
     if (tool === "canvas_create_attachment_nodes") return [textRow("图片数量", arrayValue(field(input, "attachmentIds")).length)].filter(Boolean);
+    if (tool === "canvas_import_local_media") return [textRow("媒体数量", arrayValue(field(input, "paths")).length)].filter(Boolean);
     return [];
 }
 
@@ -710,6 +711,7 @@ function toolName(name: string) {
     if (name === "canvas_export_snapshot") return "导出快照";
     if (name === "canvas_create_node") return "创建节点";
     if (name === "canvas_create_attachment_nodes") return "添加附件图片";
+    if (name === "canvas_import_local_media") return "导入本地媒体";
     if (name === "canvas_create_text_node") return "创建文本";
     if (name === "canvas_create_text_nodes") return "批量创建文本";
     if (name === "canvas_create_config_node") return "创建生成配置";

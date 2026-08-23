@@ -1,10 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ArrowUp, LoaderCircle, Maximize2, Square } from "lucide-react";
-import { Button, Modal, Tooltip } from "antd";
+import { App, Button, Modal, Tooltip } from "antd";
 import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
-import { defaultConfig, resolveModelForCapability, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
+import { defaultConfig, dreaminaModelVersion, isDreaminaModel, resolveModelForCapability, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { CanvasImageSettingsPopover } from "./canvas-image-settings-popover";
@@ -15,6 +15,8 @@ import { CanvasVideoSettingsPopover } from "./canvas-video-settings-popover";
 import { CanvasTextSettingsPopover } from "./canvas-text-settings-popover";
 import { CanvasNodeType, type CanvasGenerationMode, type CanvasNodeData } from "@/types/canvas";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
+import { estimateDreaminaCredits, prepareDreaminaGeneration, type DreaminaCreditEstimate, type DreaminaInput } from "@/services/api/dreamina";
+import { getNodeDefinition } from "@/lib/canvas/node-registry";
 
 export type CanvasNodeGenerationMode = CanvasGenerationMode;
 
@@ -32,6 +34,7 @@ type CanvasNodePromptPanelProps = {
 
 export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfigChange, onGenerate, onStop, mentionReferences = [], onImageSettingsOpenChange, modeOverride }: CanvasNodePromptPanelProps) {
     const { t } = useTranslation();
+    const { message } = App.useApp();
     const globalConfig = useEffectiveConfig();
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
@@ -42,6 +45,16 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
     const isEditingExistingContent = hasTextContent || hasImageContent;
     const [prompt, setPrompt] = useState(node.metadata?.composerContent ?? node.metadata?.prompt ?? "");
     const [expanded, setExpanded] = useState(false);
+    const [preparing, setPreparing] = useState(false);
+    const [creditEstimate, setCreditEstimate] = useState<{ loading: boolean; value?: DreaminaCreditEstimate; error?: string }>({ loading: false });
+    const dreamina = isDreaminaModel(config.model, mode === "video" ? "video" : "image");
+    const referenceCount = hasImageContent ? 1 : mentionReferences.filter((reference) => reference.kind === "image").length;
+    const generationPromptPrefix = getNodeDefinition(node.type)?.useBuiltinPanel?.promptPrefix || "";
+    const dreaminaInput = useMemo(
+        // 视频报价会把提示词长度纳入官方报价键；图片当前只按模型与生成参数计价。
+        () => buildDreaminaInput(mode, config, mode === "video" ? generationPromptPrefix + prompt : "", referenceCount),
+        [config.count, config.model, config.quality, config.size, config.videoSeconds, config.vquality, generationPromptPrefix, mode, prompt, referenceCount],
+    );
 
     // Restore prompts only when switching nodes; preserve the current input after generation on the same node.
     useEffect(() => {
@@ -49,15 +62,52 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [node.id]);
 
+    useEffect(() => {
+        if (!dreamina || !dreaminaInput) {
+            setCreditEstimate({ loading: false });
+            return;
+        }
+        const controller = new AbortController();
+        let retryTimer: number | null = null;
+        const readEstimate = () => {
+            setCreditEstimate((current) => ({ ...current, loading: true, error: undefined }));
+            void estimateDreaminaCredits(dreaminaInput, controller.signal)
+                .then((value) => setCreditEstimate({ loading: false, value }))
+                .catch((error) => {
+                    if (controller.signal.aborted) return;
+                    setCreditEstimate({ loading: false, error: error instanceof Error ? error.message : t("dreamina.liveCreditUnavailable") });
+                    retryTimer = window.setTimeout(readEstimate, 3_000);
+                });
+        };
+        const timer = window.setTimeout(readEstimate, 300);
+        return () => {
+            window.clearTimeout(timer);
+            if (retryTimer !== null) window.clearTimeout(retryTimer);
+            controller.abort();
+        };
+    }, [dreamina, dreaminaInput, t]);
+
     const updatePrompt = (value: string) => {
         setPrompt(value);
         if (isEditingExistingContent) onConfigChange(node.id, { composerContent: value });
         else onPromptChange(node.id, value);
     };
 
-    const submit = () => {
+    const submit = async () => {
         const text = prompt.trim();
-        if (!text || isRunning) return;
+        if (!text || isRunning || preparing) return;
+        if (dreamina && dreaminaInput) {
+            setPreparing(true);
+            try {
+                const taskCount = mode === "image" ? Math.max(1, Math.min(10, Number(config.count) || 1)) : 1;
+                if (!(await prepareDreaminaGeneration({ ...dreaminaInput, prompt: generationPromptPrefix + text }, taskCount))) return;
+            } catch (error) {
+                message.error(error instanceof Error ? error.message : t("dreamina.quoteUnavailable"));
+                return;
+            } finally {
+                setPreparing(false);
+            }
+        }
         onGenerate(node.id, mode, text);
     };
 
@@ -78,7 +128,7 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                 value={prompt}
                 references={mentionReferences}
                 onChange={updatePrompt}
-                onSubmit={submit}
+                onSubmit={() => void submit()}
                 className="thin-scrollbar h-40 w-full cursor-text resize-none rounded-xl px-3 py-2 text-sm leading-5 outline-none"
                 style={{ background: "transparent", color: theme.node.text }}
                 placeholder={t(`canvas.promptPanel.${mode === "image" && hasImageContent ? "editImage" : mode === "text" && hasTextContent ? "editText" : mode}`)}
@@ -119,26 +169,31 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                         </>
                     )}
                 </div>
-                <Button
-                    type="primary"
-                    className="!h-10 !min-w-16 shrink-0 !rounded-full !px-3"
-                    danger={isRunning}
-                    disabled={!isRunning && !prompt.trim()}
-                    onClick={() => (isRunning ? onStop(node.id) : submit())}
-                    aria-label={t(isRunning ? "canvas.promptPanel.stopGeneration" : "canvas.promptPanel.generate")}
-                >
-                    <span className="flex items-center gap-1.5">
-                        {isRunning ? (
-                            <>
+                <div className="flex shrink-0 items-center gap-2">
+                    {dreamina ? <DreaminaLiveCredit estimate={creditEstimate} count={mode === "image" ? Math.max(1, Number(config.count) || 1) : 1} kind={mode === "video" ? "video" : "image"} /> : null}
+                    <Button
+                        type="primary"
+                        className="!h-10 !min-w-16 shrink-0 !rounded-full !px-3"
+                        danger={isRunning}
+                        disabled={preparing || (!isRunning && !prompt.trim())}
+                        onClick={() => (isRunning ? onStop(node.id) : void submit())}
+                        aria-label={t(isRunning ? "canvas.promptPanel.stopGeneration" : "canvas.promptPanel.generate")}
+                    >
+                        <span className="flex items-center gap-1.5">
+                            {isRunning ? (
+                                <>
+                                    <LoaderCircle className="size-4 animate-spin" />
+                                    <Square className="size-3.5 fill-current" />
+                                    <span className="text-xs font-medium">{t("canvas.promptPanel.stop")}</span>
+                                </>
+                            ) : preparing ? (
                                 <LoaderCircle className="size-4 animate-spin" />
-                                <Square className="size-3.5 fill-current" />
-                                <span className="text-xs font-medium">{t("canvas.promptPanel.stop")}</span>
-                            </>
-                        ) : (
-                            <ArrowUp className="size-4" />
-                        )}
-                    </span>
-                </Button>
+                            ) : (
+                                <ArrowUp className="size-4" />
+                            )}
+                        </span>
+                    </Button>
+                </div>
             </div>
             <Modal title={t("canvas.promptPanel.editorTitle")} open={expanded} centered width={760} footer={null} onCancel={() => setExpanded(false)} destroyOnHidden>
                 <div data-canvas-no-zoom className="pt-2" onWheelCapture={(event) => event.stopPropagation()}>
@@ -154,6 +209,40 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
             </Modal>
         </div>
     );
+}
+
+function DreaminaLiveCredit({ estimate, count, kind }: { estimate: { loading: boolean; value?: DreaminaCreditEstimate; error?: string }; count: number; kind: "image" | "video" }) {
+    const { t } = useTranslation();
+    if (estimate.loading) return <span className="whitespace-nowrap text-[11px] opacity-60">{t("dreamina.liveCreditLoading")}</span>;
+    if (!estimate.value) return <Tooltip title={estimate.error || t("dreamina.liveCreditUnavailable")}><span className="whitespace-nowrap text-[11px] opacity-60">{t("dreamina.liveCreditUnavailable")}</span></Tooltip>;
+    const perImage = estimate.value.credits / Math.max(1, count);
+    const label = kind === "video"
+        ? t("dreamina.liveCreditVideo", { credits: estimate.value.credits })
+        : t("dreamina.liveCreditPerImage", { credits: Number.isInteger(perImage) ? perImage : perImage.toFixed(1) });
+    return <Tooltip title={t("dreamina.liveCreditTotal", { credits: estimate.value.credits })}><span className="whitespace-nowrap text-xs font-medium tabular-nums">{label}</span></Tooltip>;
+}
+
+function buildDreaminaInput(mode: CanvasNodeGenerationMode, config: AiConfig, prompt: string, referenceCount: number): DreaminaInput | null {
+    const references = Array.from({ length: Math.max(0, Math.min(10, referenceCount)) }, (_, index) => ({ name: `reference-${index + 1}.png`, dataUrl: "" }));
+    if (mode === "image" && isDreaminaModel(config.model, "image")) return {
+        kind: "image",
+        prompt,
+        modelVersion: dreaminaModelVersion(config.model, "image"),
+        count: Math.max(1, Math.min(10, Number(config.count) || 1)),
+        size: config.size,
+        quality: config.quality,
+        references,
+    };
+    if (mode === "video" && isDreaminaModel(config.model, "video")) return {
+        kind: "video",
+        prompt,
+        modelVersion: dreaminaModelVersion(config.model, "video"),
+        size: config.size,
+        seconds: Number(config.videoSeconds) || undefined,
+        resolution: config.vquality,
+        references: references.slice(0, 1),
+    };
+    return null;
 }
 
 function defaultMode(type: CanvasNodeData["type"]): CanvasNodeGenerationMode {

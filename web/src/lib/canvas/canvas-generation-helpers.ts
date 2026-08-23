@@ -48,7 +48,7 @@ export async function hydrateCanvasImages(nodes: CanvasNodeData[]) {
             const content = node.metadata?.content;
             if ((node.type === CanvasNodeType.Video || node.type === CanvasNodeType.Audio) && node.metadata?.storageKey) return { ...node, metadata: { ...node.metadata, content: await resolveMediaUrl(node.metadata.storageKey, content) } };
             if (node.type !== CanvasNodeType.Image || !content) return node;
-            const images = await Promise.all((node.metadata.images || []).map(async (image) => (image.content ? { ...image, content: await resolveImageUrl(image.storageKey, image.content) } : image)));
+            const images = await Promise.all((node.metadata?.images || []).map(async (image) => (image.content ? { ...image, content: await resolveImageUrl(image.storageKey, image.content) } : image)));
             if (node.metadata?.storageKey) return { ...node, metadata: { ...node.metadata, content: await resolveImageUrl(node.metadata.storageKey, content), images } };
             if (!content.startsWith("data:image/")) return node;
             return { ...node, metadata: { ...node.metadata, ...imageMetadata(await uploadImage(content)) } };
@@ -112,8 +112,50 @@ export function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | u
 }
 
 export function resetInterruptedGeneration(nodes: CanvasNodeData[]) {
-    return nodes.map((node) =>
-        node.metadata?.status === "loading"
+    return nodes.map((node) => {
+        const images = node.metadata?.images || [];
+        const staleSingleResult = node.type === CanvasNodeType.Image
+            && node.metadata?.status === "success"
+            && Boolean(node.metadata.content || node.metadata.storageKey)
+            && Number(node.metadata.count || 1) === 1
+            && images.length === 1
+            && images[0].status === "error";
+        if (staleSingleResult) {
+            const imageId = node.metadata?.primaryImageId || images[0].id;
+            return {
+                ...node,
+                metadata: {
+                    ...node.metadata,
+                    images: [{
+                        id: imageId,
+                        status: "success" as const,
+                        content: node.metadata?.content || "",
+                        storageKey: node.metadata?.storageKey || "",
+                        naturalWidth: node.metadata?.naturalWidth || 0,
+                        naturalHeight: node.metadata?.naturalHeight || 0,
+                        bytes: node.metadata?.bytes || 0,
+                        mimeType: node.metadata?.mimeType || "image/png",
+                    }],
+                    primaryImageId: imageId,
+                    dreaminaSubmitId: undefined,
+                    dreaminaProgress: undefined,
+                    errorDetails: undefined,
+                },
+            };
+        }
+        const hasResumableDreaminaTask = Boolean(node.metadata?.dreaminaSubmitId) || node.metadata?.images?.some((image) => image.dreaminaSubmitId && !image.content);
+        if (hasResumableDreaminaTask) {
+            return {
+                ...node,
+                metadata: {
+                    ...node.metadata,
+                    status: "loading" as const,
+                    errorDetails: undefined,
+                    images: node.metadata?.images?.map((image) => image.dreaminaSubmitId && !image.content ? { ...image, status: "loading" as const, errorDetails: undefined } : image),
+                },
+            };
+        }
+        return node.metadata?.status === "loading"
             ? {
                   ...node,
                   metadata: {
@@ -123,8 +165,8 @@ export function resetInterruptedGeneration(nodes: CanvasNodeData[]) {
                       images: node.metadata.images?.map((image) => (image.status === "loading" ? { ...image, status: "error" as const, errorDetails: i18n.t("canvas.generation.interrupted") } : image)),
                   },
               }
-            : node,
-    );
+            : node;
+    });
 }
 
 export function isGenerationCanceled(error: unknown) {

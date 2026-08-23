@@ -24,11 +24,23 @@ export type CanvasNodeTypeId = CanvasNodeType | (string & {});
 export type CanvasNodeStatus = "idle" | "success" | "loading" | "error";
 export type CanvasGenerationMode = "text" | "image" | "video" | "audio";
 export type CanvasImageGenerationType = "generation" | "edit";
+export type CanvasDreaminaProgress = {
+    phase: "submitting" | "submitted" | "queued" | "processing" | "awaiting_confirmation" | "downloading";
+    genStatus: string;
+    queueStatus?: string;
+    queueIndex?: number;
+    queueLength?: number;
+    elapsedMs: number;
+    unchangedMs: number;
+    updatedAt: number;
+};
 
 export type CanvasNodeImage = {
     id: string;
     status: CanvasNodeStatus;
     errorDetails?: string;
+    dreaminaSubmitId?: string;
+    dreaminaProgress?: CanvasDreaminaProgress;
     content: string;
     storageKey: string;
     naturalWidth: number;
@@ -46,6 +58,8 @@ export type CanvasNodeMetadata = {
     fontSize?: number;
     generationMode?: CanvasGenerationMode;
     generationType?: CanvasImageGenerationType;
+    dreaminaSubmitId?: string;
+    dreaminaProgress?: CanvasDreaminaProgress;
     model?: string;
     reasoningEffort?: "auto" | "low" | "medium" | "high" | "xhigh";
     size?: string;

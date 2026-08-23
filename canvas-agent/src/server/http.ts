@@ -10,6 +10,8 @@ import { messageMetadataStore } from "../agent/message-metadata.js";
 import type { AgentAttachment, AgentPermissionMode } from "../agent/types.js";
 import { AGENT_PROTOCOL_VERSION, CanvasSession } from "../canvas/session.js";
 import { DEFAULT_PORT, ensureSiteWorkspace, loadConfig, saveConfig, updateSiteWorkspace, type CanvasAgentConfig } from "../config.js";
+import { DreaminaGenerationService, type DreaminaGenerateInput } from "../integrations/dreamina-generation.js";
+import { DREAMINA_QUOTE_BRIDGE_VERSION, DreaminaWebQuoteBridge } from "../integrations/dreamina-web-quote-bridge.js";
 import { logger } from "../utils/logger.js";
 import { checkVersions } from "../version-check.js";
 import { SkillStore, SkillStoreError } from "../skills/store.js";
@@ -23,6 +25,8 @@ export function startHttpServer() {
 
     const initialWorkspace = ensureSiteWorkspace(config);
     const session = new CanvasSession(initialWorkspace.activeThreadId || "");
+    const dreaminaWebQuoteBridge = new DreaminaWebQuoteBridge();
+    const dreamina = new DreaminaGenerationService({ webQuote: ({ forceRefresh, ...input }) => dreaminaWebQuoteBridge.quote(input, { forceRefresh }) });
     const skillStore = new SkillStore(initialWorkspace.workspacePath);
     /** 将 Agent 事件广播到所属线程或全部网页。 */
     const emit = (type: string, payload: unknown) => {
@@ -122,6 +126,23 @@ export function startHttpServer() {
     });
     app.get("/health", (_req, res) => res.json(session.health()));
     app.get("/config", (_req, res) => res.json({ ok: true, protocolVersion: AGENT_PROTOCOL_VERSION, url: config.url, hasToken: true }));
+    app.get("/dreamina/web-bridge/poll", route(async (req, res) => {
+        const clientId = String(req.query.clientId || "");
+        const version = String(req.query.version || "");
+        if (version !== DREAMINA_QUOTE_BRIDGE_VERSION) {
+            res.status(409).json({ ok: false, error: `请在 Edge 扩展页重新加载即梦报价桥 ${DREAMINA_QUOTE_BRIDGE_VERSION}` });
+            return;
+        }
+        const task = await dreaminaWebQuoteBridge.poll(clientId, Number(req.query.waitMs) || 20_000, version);
+        res.json({ ok: true, task });
+    }));
+    app.post("/dreamina/web-bridge/result", route(async (req, res) => {
+        const clientId = String(req.body?.clientId || "");
+        const requestId = String(req.body?.requestId || "");
+        const accepted = dreaminaWebQuoteBridge.complete(clientId, requestId, req.body || {});
+        res.status(accepted ? 200 : 404).json({ ok: accepted });
+    }));
+    app.get("/dreamina/web-bridge/status", (_req, res) => res.json({ ok: true, ...dreaminaWebQuoteBridge.status() }));
     app.use((req, res, next) => {
         if (validToken(req, requestUrl(req, config), config.token)) return next();
         res.status(401).json({ ok: false, error: "invalid token" });
@@ -168,6 +189,37 @@ export function startHttpServer() {
         if (!file.isFile()) return res.status(400).json({ ok: false, error: "图片文件无效" });
         res.setHeader("Cache-Control", "no-store");
         res.type(path.extname(filePath)).send(await readFile(filePath));
+    }));
+    app.post("/agent/local-media", route(async (req, res) => {
+        const filePath = String(req.body?.path || "");
+        if (!path.isAbsolute(filePath) || !/\.(?:aac|avif|flac|gif|jpe?g|m4a|m4v|mov|mp3|mp4|ogg|png|wav|webm|webp)$/i.test(filePath)) return res.status(400).json({ ok: false, error: "媒体路径无效" });
+        const file = await stat(filePath);
+        if (!file.isFile()) return res.status(400).json({ ok: false, error: "媒体文件无效" });
+        res.setHeader("Cache-Control", "no-store");
+        await new Promise<void>((resolve, reject) => res.sendFile(filePath, (error) => error ? reject(error) : resolve()));
+    }));
+    app.get("/dreamina/status", (_req, res) => res.json({ ok: true, ...dreamina.status() }));
+    app.get("/dreamina/credit", route(async (_req, res) => res.json({ ok: true, ...(await dreamina.credit()) })));
+    app.post("/dreamina/quote", route(async (req, res) => {
+        const input = (req.body || {}) as DreaminaGenerateInput;
+        res.json({ ok: true, ...(await dreamina.quote(input)) });
+    }));
+    app.post("/dreamina/estimate", route(async (req, res) => {
+        const input = (req.body || {}) as DreaminaGenerateInput;
+        res.json({ ok: true, ...(await dreamina.estimate(input)), bridgeConnected: dreaminaWebQuoteBridge.status().connected });
+    }));
+    app.post("/dreamina/generate", route(async (req, res) => {
+        const input = (req.body || {}) as DreaminaGenerateInput;
+        res.json({ ok: true, ...(await dreamina.start(input)) });
+    }));
+    app.get("/dreamina/tasks/:submitId", route(async (req, res) => {
+        res.json({ ok: true, ...(await dreamina.query(routeParam(req.params.submitId))) });
+    }));
+    app.get("/dreamina/media/:mediaId", route(async (req, res) => {
+        const media = await dreamina.readMedia(routeParam(req.params.mediaId));
+        if (!media) return res.status(404).json({ ok: false, error: "即梦媒体已过期或不存在" });
+        res.setHeader("Cache-Control", "private, max-age=3600");
+        await new Promise<void>((resolve, reject) => res.type(media.mimeType).sendFile(media.filePath, (error) => error ? reject(error) : resolve()));
     }));
     app.post("/api/tools", route(async (req, res) => res.json({ ok: true, result: await session.callTool(req.body?.name, req.body?.input || {}) })));
     app.get("/agent/codex/workspace", (_req, res) => {
@@ -525,6 +577,7 @@ function setCors(req: Request, res: Response, url: URL, config: CanvasAgentConfi
     res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
     res.setHeader("Access-Control-Allow-Private-Network", "true");
     if (!origin || req.method === "OPTIONS" || url.pathname === "/health" || url.pathname === "/config") return true;
+    if (url.pathname.startsWith("/dreamina/web-bridge/") && /^chrome-extension:\/\/[a-p]{32}$/.test(origin)) return true;
     config.origins ||= [];
     if (validToken(req, url, config.token) && !config.origins.includes(origin)) {
         config.origins.push(origin);

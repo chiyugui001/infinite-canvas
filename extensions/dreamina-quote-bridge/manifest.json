@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "Infinite Canvas · 即梦实时报价桥",
+  "version": "0.2.0",
+  "description": "只读同步即梦网页显示的生成积分，不包含生成或提交能力。",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuQfPxqQGs106RZXzbmFRE+ysUyf3yat1iuL38jXzQ/Vl0LJEsHgPwuhyrgmKTWYAeMIYQb4Nyupv/pPZoLQMBmpd9mZdAGIRAUQJzVHTnC5tEmRVF1+bxOtHtEdFTB98hZ7FI9wbFfRaLoHoIEsMbr4y7IzITb/0M14xoD846g7DM+/Lt+uNkqB1TP0Hiqbnb/sirL7iarSdfHDsY54qXY2sIJTL+QZ23ZngIwt02XvZSMVYTSmhxLLEs+q4PLWJks8DPw2cmJuH9u5zOoL4oj5NGldxC09vZCzU4psRaDw3BcX+ezdSf8vHt3XOQyXKEs3JkK+gBc9S1fIllCUqHQIDAQAB",
+  "permissions": ["alarms", "storage", "tabs"],
+  "host_permissions": [
+    "https://jimeng.jianying.com/*",
+    "http://127.0.0.1:17371/*"
+  ],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "action": { "default_title": "即梦实时报价桥", "default_popup": "popup.html" },
+  "content_scripts": [
+    {
+      "matches": ["https://jimeng.jianying.com/ai-tool/generate*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

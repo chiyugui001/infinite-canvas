@@ -1,7 +1,8 @@
 import axios from "axios";
 
 import i18n from "@/i18n";
-import { buildApiUrl, resolveModelRequestConfig, resolveModelScript, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
+import { buildApiUrl, dreaminaModelVersion, isDreaminaModel, resolveModelRequestConfig, resolveModelScript, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
+import { requestDreaminaImages, type DreaminaTaskProgress } from "./dreamina";
 import { normalizePluginImages, runModelPlugin } from "./model-plugin";
 import { nanoid } from "nanoid";
 import { dataUrlToFile } from "@/lib/image-utils";
@@ -94,7 +95,7 @@ type GeminiPayload = {
     promptFeedback?: { blockReason?: string };
 };
 type GeminiStreamState = { buffer: string; text: string; toolCalls: ResponseToolCall[]; error?: string };
-type RequestOptions = { signal?: AbortSignal };
+type RequestOptions = { signal?: AbortSignal; onDreaminaTask?: (submitId: string) => void; onDreaminaProgress?: (progress: DreaminaTaskProgress) => void };
 
 const QUALITY_BASE: Record<string, number> = {
     low: 1024,
@@ -715,6 +716,8 @@ function parseGeminiImagePayload(payload: GeminiPayload) {
 }
 
 export async function requestGeneration(config: AiConfig, prompt: string, options?: RequestOptions) {
+    const selectedModel = config.model || config.imageModel;
+    if (isDreaminaModel(selectedModel, "image")) return (await requestDreaminaImages({ prompt, modelVersion: dreaminaModelVersion(selectedModel, "image"), count: Number(config.count), size: config.size, quality: config.quality }, [], { signal: options?.signal, onTask: options?.onDreaminaTask, onProgress: options?.onDreaminaProgress })).map((dataUrl) => ({ id: nanoid(), dataUrl }));
     const requestConfig = resolveModelRequestConfig(config, config.model || config.imageModel);
     const n = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
     const script = resolveModelScript(config, config.model || config.imageModel);
@@ -773,6 +776,11 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
 }
 
 export async function requestEdit(config: AiConfig, prompt: string, references: ReferenceImage[], mask?: ReferenceImage, options?: RequestOptions) {
+    const selectedModel = config.model || config.imageModel;
+    if (isDreaminaModel(selectedModel, "image")) {
+        if (mask) throw new Error(apiText("maskModelUnsupported"));
+        return (await requestDreaminaImages({ prompt, modelVersion: dreaminaModelVersion(selectedModel, "image"), count: Number(config.count), size: config.size, quality: config.quality }, references, { signal: options?.signal, onTask: options?.onDreaminaTask, onProgress: options?.onDreaminaProgress })).map((dataUrl) => ({ id: nanoid(), dataUrl }));
+    }
     const requestConfig = resolveModelRequestConfig(config, config.model || config.imageModel);
     const n = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
     const requestPrompt = buildImageReferencePromptText(prompt, references);

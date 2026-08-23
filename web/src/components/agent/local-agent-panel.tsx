@@ -8,12 +8,13 @@ import { useTranslation } from "react-i18next";
 import i18n from "@/i18n";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { upscaleDataUrl } from "@/lib/canvas/canvas-image-data";
-import { imageMetadata } from "@/lib/canvas/canvas-node-factory";
+import { audioMetadata, imageMetadata, videoMetadata } from "@/lib/canvas/canvas-node-factory";
 import { fitNodeSize } from "@/lib/canvas/canvas-node-size";
 import { resolveCanvasReferenceImages } from "@/lib/canvas/canvas-resource-references";
 import { readImageMeta } from "@/lib/image-utils";
 import { randomId } from "@/lib/utils";
 import { uploadImage } from "@/services/image-storage";
+import { uploadMediaFile } from "@/services/file-storage";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { useAgentSkillStore } from "@/stores/use-agent-skill-store";
 import { useShallow } from "zustand/react/shallow";
@@ -814,7 +815,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
             return;
         }
         try {
-            const input: { ops?: CanvasAgentOp[]; path?: string } = payload.input || {};
+            const input: { ops?: CanvasAgentOp[]; path?: string; nodes?: unknown } = payload.input || {};
             addEventLog(toolName(payload.name), payload, payload);
             let result: unknown;
             let appliedOps = input.ops || [];
@@ -831,6 +832,12 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
                 const context = canvasContextRef.current;
                 if (!context) throw new Error(rt("openCanvasFirst"));
                 appliedOps = await attachmentNodeOps(endpoint, token, clientIdRef.current, payload.input?.nodes);
+                result = context.applyOps(appliedOps);
+                await postState(endpoint, token, clientIdRef.current, result as CanvasAgentSnapshot);
+            } else if (payload.name === "canvas_import_local_media") {
+                const context = canvasContextRef.current;
+                if (!context) throw new Error(rt("openCanvasFirst"));
+                appliedOps = await localMediaNodeOps(endpoint, token, input.nodes);
                 result = context.applyOps(appliedOps);
                 await postState(endpoint, token, clientIdRef.current, result as CanvasAgentSnapshot);
             } else {
@@ -1519,6 +1526,47 @@ async function attachmentNodeOps(endpoint: string, token: string, clientId: stri
             };
         }),
     );
+}
+
+async function localMediaNodeOps(endpoint: string, token: string, value: unknown): Promise<CanvasAgentOp[]> {
+    const nodes = Array.isArray(value) ? value : [];
+    if (!nodes.length) throw new Error("没有可导入的本地媒体文件");
+    return await Promise.all(
+        nodes.map(async (value) => {
+            const item = value as { id?: unknown; path?: unknown; title?: unknown; position?: unknown };
+            const id = String(item.id || "");
+            const filePath = String(item.path || "");
+            if (!id || !filePath) throw new Error("本地媒体节点参数无效");
+            const response = await fetch(`${endpoint}/agent/local-media?token=${encodeURIComponent(token)}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: filePath }) });
+            if (!response.ok) {
+                const body = (await response.json().catch(() => null)) as { error?: string } | null;
+                throw new Error(body?.error || "无法读取本地媒体文件");
+            }
+            const blob = await response.blob();
+            const kind = localMediaKind(filePath, blob.type);
+            const positionValue = item.position && typeof item.position === "object" ? (item.position as { x?: unknown; y?: unknown }) : {};
+            const position = { x: Number(positionValue.x) || 0, y: Number(positionValue.y) || 0 };
+            const title = String(item.title || filePath.split(/[\\/]/).pop() || "Dreamina CLI");
+            if (kind === "image") {
+                const image = await uploadImage(blob);
+                const size = fitNodeSize(image.width, image.height);
+                return { type: "add_node" as const, id, nodeType: "image" as const, title, position, ...size, metadata: { ...imageMetadata(image), source: "Dreamina CLI" } };
+            }
+            const media = await uploadMediaFile(blob, kind);
+            const size = kind === "video" ? fitNodeSize(media.width || 1280, media.height || 720) : { width: 360, height: 140 };
+            return { type: "add_node" as const, id, nodeType: kind, title, position, ...size, metadata: { ...(kind === "video" ? videoMetadata(media) : audioMetadata(media)), source: "Dreamina CLI" } };
+        }),
+    );
+}
+
+function localMediaKind(filePath: string, mimeType: string): "image" | "video" | "audio" {
+    if (mimeType.startsWith("image/")) return "image";
+    if (mimeType.startsWith("video/")) return "video";
+    if (mimeType.startsWith("audio/")) return "audio";
+    if (/\.(?:avif|gif|jpe?g|png|webp)$/i.test(filePath)) return "image";
+    if (/\.(?:m4v|mov|mp4|webm)$/i.test(filePath)) return "video";
+    if (/\.(?:aac|flac|m4a|mp3|ogg|wav)$/i.test(filePath)) return "audio";
+    throw new Error("不支持的本地媒体格式");
 }
 
 function createId() {

@@ -64,6 +64,16 @@ export type ConfigTabKey = "channels" | "preferences" | "prompt-sources" | "webd
 
 export const CONFIG_STORE_KEY = "infinite-canvas:ai_config_store";
 const CHANNEL_MODEL_SEPARATOR = "::";
+const LEGACY_DREAMINA_IMAGE_MODEL = "dreamina::image";
+const LEGACY_DREAMINA_VIDEO_MODEL = "dreamina::video";
+const DREAMINA_IMAGE_MODEL_PREFIX = `${LEGACY_DREAMINA_IMAGE_MODEL}::`;
+const DREAMINA_VIDEO_MODEL_PREFIX = `${LEGACY_DREAMINA_VIDEO_MODEL}::`;
+export const DREAMINA_IMAGE_VERSIONS = ["3.0", "3.1", "4.0", "4.1", "4.5", "4.6", "4.7", "5.0", "5.0Pro"] as const;
+export const DREAMINA_VIDEO_VERSIONS = ["seedance1.0fast", "seedance1.5pro", "seedance2.0", "seedance2.0fast", "seedance2.0_vip", "seedance2.0fast_vip", "seedance2.0mini", "seedance2.5"] as const;
+export const DREAMINA_IMAGE_MODEL = `${DREAMINA_IMAGE_MODEL_PREFIX}5.0`;
+export const DREAMINA_VIDEO_MODEL = `${DREAMINA_VIDEO_MODEL_PREFIX}seedance2.0fast`;
+export const DREAMINA_IMAGE_MODELS = DREAMINA_IMAGE_VERSIONS.map((version) => `${DREAMINA_IMAGE_MODEL_PREFIX}${version}`);
+export const DREAMINA_VIDEO_MODELS = DREAMINA_VIDEO_VERSIONS.map((version) => `${DREAMINA_VIDEO_MODEL_PREFIX}${version}`);
 const OPENAI_BASE_URL = "https://api.openai.com";
 const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
 
@@ -87,9 +97,9 @@ export const defaultConfig: AiConfig = {
             ],
         },
     ],
-    model: "default::gpt-image-2",
-    imageModel: "default::gpt-image-2",
-    videoModel: "default::grok-imagine-video",
+    model: DREAMINA_IMAGE_MODEL,
+    imageModel: DREAMINA_IMAGE_MODEL,
+    videoModel: DREAMINA_VIDEO_MODEL,
     textModel: "default::gpt-5.5",
     audioModel: "default::gpt-4o-mini-tts",
     audioVoice: "alloy",
@@ -158,6 +168,8 @@ function findChannelModel(config: AiConfig, value: string): { channel: ModelChan
 }
 
 export function modelCapabilityOf(config: AiConfig, value: string): ModelCapability | undefined {
+    if (isDreaminaModel(value, "image")) return "image";
+    if (isDreaminaModel(value, "video")) return "video";
     return findChannelModel(config, value)?.model.capability;
 }
 
@@ -169,14 +181,28 @@ export function modelMatchesCapability(config: AiConfig, value: string, capabili
 export function resolveModelForCapability(config: AiConfig, currentModel: string | undefined, capability: ModelCapability) {
     const defaultModel = capability === "image" ? config.imageModel : capability === "video" ? config.videoModel : capability === "audio" ? config.audioModel : config.textModel;
     const fallbackModel = capability === "image" ? defaultConfig.imageModel : capability === "video" ? defaultConfig.videoModel : capability === "audio" ? defaultConfig.audioModel : defaultConfig.textModel;
-    if (currentModel && modelMatchesCapability(config, currentModel, capability)) return currentModel;
-    if (defaultModel && modelMatchesCapability(config, defaultModel, capability)) return defaultModel;
+    if (currentModel && modelMatchesCapability(config, currentModel, capability)) return normalizeLegacyDreaminaModel(currentModel);
+    if (defaultModel && modelMatchesCapability(config, defaultModel, capability)) return normalizeLegacyDreaminaModel(defaultModel);
     return fallbackModel;
 }
 
 export function selectableModelsByCapability(config: AiConfig, capability?: ModelCapability) {
-    if (!capability) return config.models;
-    return config.channels.flatMap((channel) => channel.models.filter((model) => model.capability === capability).map((model) => encodeChannelModel(channel.id, model.name)));
+    const dreamina = capability === "image" ? DREAMINA_IMAGE_MODELS : capability === "video" ? DREAMINA_VIDEO_MODELS : capability ? [] : [...DREAMINA_IMAGE_MODELS, ...DREAMINA_VIDEO_MODELS];
+    const configured = capability ? config.channels.flatMap((channel) => channel.models.filter((model) => model.capability === capability).map((model) => encodeChannelModel(channel.id, model.name))) : config.models;
+    return [...dreamina, ...configured];
+}
+
+export function isDreaminaModel(value: string, capability?: "image" | "video") {
+    const image = value === LEGACY_DREAMINA_IMAGE_MODEL || value.startsWith(DREAMINA_IMAGE_MODEL_PREFIX);
+    const video = value === LEGACY_DREAMINA_VIDEO_MODEL || value.startsWith(DREAMINA_VIDEO_MODEL_PREFIX);
+    return capability === "image" ? image : capability === "video" ? video : image || video;
+}
+
+export function dreaminaModelVersion(value: string, capability: "image" | "video") {
+    if (!isDreaminaModel(value, capability)) return "";
+    if (value === LEGACY_DREAMINA_IMAGE_MODEL) return "5.0";
+    if (value === LEGACY_DREAMINA_VIDEO_MODEL) return "seedance2.0fast";
+    return value.slice((capability === "image" ? DREAMINA_IMAGE_MODEL_PREFIX : DREAMINA_VIDEO_MODEL_PREFIX).length);
 }
 
 /** The user script (if any) attached to a model; empty string means use the system default call. */
@@ -185,6 +211,7 @@ export function resolveModelScript(config: AiConfig, value: string) {
 }
 
 function isAiConfigReady(config: AiConfig, model: string) {
+    if (isDreaminaModel(model)) return true;
     const channel = resolveModelChannel(config, model);
     return Boolean(model.trim() && channel.baseUrl.trim() && channel.apiKey.trim());
 }
@@ -236,6 +263,7 @@ export const useConfigStore = create<ConfigStore>()(
                         apiFormat: normalizeApiFormat(config.apiFormat),
                         channels,
                         models,
+                        model: normalizeModelOptionValue(config.model, channels) || defaultConfig.model,
                         imageModel: normalizeModelOptionValue(config.imageModel || config.model, channels),
                         videoModel: normalizeModelOptionValue(config.videoModel, channels),
                         textModel: normalizeModelOptionValue(config.textModel || config.model, channels),
@@ -268,7 +296,7 @@ export function normalizeChannelModels(models: Array<string | ChannelModel> | un
     const result: ChannelModel[] = [];
     for (const item of models || []) {
         const name = (typeof item === "string" ? item : item?.name || "").trim();
-        if (!name || seen.has(name)) continue;
+        if (!name || seen.has(name) || isLeakedDreaminaChannelModel(name)) continue;
         seen.add(name);
         const capability = typeof item === "string" ? guessCapability(name) : item.capability || guessCapability(name);
         const script = typeof item === "string" ? undefined : item.script?.trim() || undefined;
@@ -308,6 +336,14 @@ export function modelOptionName(value: string) {
 }
 
 export function modelOptionLabel(config: AiConfig, value: string) {
+    if (isDreaminaModel(value, "image")) {
+        const version = dreaminaModelVersion(value, "image");
+        return i18n.t(version === "3.0" || version === "3.1" ? "dreamina.imageModelVersionTextOnly" : "dreamina.imageModelVersion", { version: displayDreaminaVersion(version) });
+    }
+    if (isDreaminaModel(value, "video")) {
+        const version = dreaminaModelVersion(value, "video");
+        return i18n.t(version === "seedance1.0fast" || version === "seedance1.5pro" ? "dreamina.videoModelVersionImageOnly" : "dreamina.videoModelVersion", { version: displayDreaminaVersion(version) });
+    }
     const decoded = decodeChannelModel(value);
     if (!decoded) return value;
     const channel = config.channels.find((item) => item.id === decoded.channelId);
@@ -321,6 +357,7 @@ export function modelOptionsFromChannels(channels: ModelChannel[]) {
 export function normalizeModelOptionValue(value: string | undefined, channels: ModelChannel[]) {
     const model = (value || "").trim();
     if (!model) return "";
+    if (isDreaminaModel(model)) return normalizeLegacyDreaminaModel(model);
     const decoded = decodeChannelModel(model);
     if (decoded) {
         const channel = channels.find((item) => item.id === decoded.channelId);
@@ -328,6 +365,31 @@ export function normalizeModelOptionValue(value: string | undefined, channels: M
     }
     const channel = channels.find((item) => item.models.some((entry) => entry.name === model)) || channels[0];
     return channel && channel.models.some((item) => item.name === model) ? encodeChannelModel(channel.id, model) : model;
+}
+
+function isLeakedDreaminaChannelModel(name: string) {
+    return DREAMINA_IMAGE_VERSIONS.some((version) => name === `image::${version}`) || DREAMINA_VIDEO_VERSIONS.some((version) => name === `video::${version}`);
+}
+
+function normalizeLegacyDreaminaModel(model: string) {
+    if (model === LEGACY_DREAMINA_IMAGE_MODEL) return DREAMINA_IMAGE_MODEL;
+    if (model === LEGACY_DREAMINA_VIDEO_MODEL) return DREAMINA_VIDEO_MODEL;
+    return model;
+}
+
+function displayDreaminaVersion(version: string) {
+    const labels: Record<string, string> = {
+        "5.0Pro": "5.0 Pro",
+        "seedance1.0fast": "Seedance 1.0 Fast",
+        "seedance1.5pro": "Seedance 1.5 Pro",
+        "seedance2.0": "Seedance 2.0",
+        "seedance2.0fast": "Seedance 2.0 Fast",
+        "seedance2.0_vip": "Seedance 2.0 VIP",
+        "seedance2.0fast_vip": "Seedance 2.0 Fast VIP",
+        "seedance2.0mini": "Seedance 2.0 Mini",
+        "seedance2.5": "Seedance 2.5 VIP",
+    };
+    return labels[version] || version;
 }
 
 export function resolveModelChannel(config: AiConfig, value: string) {

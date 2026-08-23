@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import i18n from "@/i18n";
 import { ImageSettingsTheme } from "@/components/image-settings-panel";
 import { type CanvasTheme } from "@/lib/canvas-theme";
-import { type AiConfig } from "@/stores/use-config-store";
+import { dreaminaModelVersion, isDreaminaModel, type AiConfig } from "@/stores/use-config-store";
 
 const resolutionOptions = [
     { value: "720", label: "720p" },
@@ -22,6 +22,15 @@ const sizeOptions = [
 
 const secondOptions = [6, 10, 12, 16, 20];
 
+const dreaminaSizeOptions = [
+    { value: "21:9", label: "21:9", width: 21, height: 9 },
+    { value: "16:9", label: "16:9", width: 16, height: 9 },
+    { value: "4:3", label: "4:3", width: 4, height: 3 },
+    { value: "1:1", label: "1:1", width: 1, height: 1 },
+    { value: "3:4", label: "3:4", width: 3, height: 4 },
+    { value: "9:16", label: "9:16", width: 9, height: 16 },
+];
+
 export const videoResolutionOptions = resolutionOptions.map((item) => ({ value: item.value, label: item.label }));
 export const videoSizeOptions = sizeOptions.map((item) => ({ value: item.value, get label() { return i18n.t(`settingsPanels.video.sizes.${item.labelKey}`); } }));
 export const videoSecondOptions = secondOptions.map((value) => String(value));
@@ -36,10 +45,14 @@ type VideoSettingsPanelProps = {
 
 export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = true, className = "w-[320px] space-y-4 rounded-2xl px-1 py-0.5" }: VideoSettingsPanelProps) {
     const { t } = useTranslation();
-    const seconds = config.videoSeconds || "6";
-    const size = normalizeVideoSizeValue(config.size);
+    const dreamina = isDreaminaModel(config.model, "video");
+    const seconds = dreamina ? normalizeDreaminaSeconds(config.videoSeconds, config.model) : config.videoSeconds || "6";
+    const size = dreamina ? normalizeDreaminaVideoSize(config.size) : normalizeVideoSizeValue(config.size);
     const dimensions = readSizeDimensions(size);
-    const resolution = normalizeVideoResolutionValue(config.vquality);
+    const resolution = dreamina ? normalizeDreaminaVideoResolution(config.vquality, config.model) : normalizeVideoResolutionValue(config.vquality);
+    const activeResolutionOptions = dreamina ? dreaminaVideoResolutionOptions(config.model) : resolutionOptions;
+    const durationRange = dreamina ? dreaminaVideoDurationRange(config.model) : { min: 1, max: 20 };
+    const activeSecondOptions = dreamina ? dreaminaVideoSecondOptions(durationRange) : secondOptions;
     const updateDimension = (key: "width" | "height", value: number | null) => {
         const next = Math.max(1, Math.floor(value || dimensions[key] || 720));
         onConfigChange("size", `${key === "width" ? next : dimensions.width}x${key === "height" ? next : dimensions.height}`);
@@ -51,22 +64,22 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                 {showTitle ? <div className="text-lg font-semibold">{t("settingsPanels.video.title")}</div> : null}
                 <SettingGroup title={t("settingsPanels.video.quality")} color={theme.node.muted}>
                     <div className="grid grid-cols-3 gap-2.5">
-                        {resolutionOptions.map((item) => (
+                        {activeResolutionOptions.map((item) => (
                             <OptionPill key={item.value} selected={resolution === item.value} theme={theme} onClick={() => onConfigChange("vquality", item.value)}>
                                 {item.label}
                             </OptionPill>
                         ))}
-                        <ResolutionInput value={resolution} theme={theme} onChange={(value) => onConfigChange("vquality", value)} />
+                        {dreamina ? null : <ResolutionInput value={resolution} theme={theme} onChange={(value) => onConfigChange("vquality", value)} />}
                     </div>
                 </SettingGroup>
                 <SettingGroup title={t("settingsPanels.video.size")} color={theme.node.muted}>
-                    <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2.5">
+                    {dreamina ? null : <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2.5">
                         <DimensionInput prefix="W" value={dimensions.width} disabled={size === "auto"} theme={theme} onChange={(value) => updateDimension("width", value)} />
                         <span className="text-lg opacity-45">↔</span>
                         <DimensionInput prefix="H" value={dimensions.height} disabled={size === "auto"} theme={theme} onChange={(value) => updateDimension("height", value)} />
-                    </div>
+                    </div>}
                     <div className="grid grid-cols-3 gap-2.5">
-                        {sizeOptions.map((item) => (
+                        {(dreamina ? dreaminaSizeOptions : sizeOptions).map((item) => (
                             <button
                                 key={item.value}
                                 type="button"
@@ -76,8 +89,8 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                                 onClick={() => onConfigChange("size", item.value)}
                             >
                                 <SizePreview width={item.width} height={item.height} color={theme.node.text} />
-                                <span>{t(`settingsPanels.video.sizes.${item.labelKey}`)}</span>
-                                {item.value === "auto" ? null : (
+                                <span>{"label" in item ? item.label : t(`settingsPanels.video.sizes.${item.labelKey}`)}</span>
+                                {dreamina || item.value === "auto" ? null : (
                                     <span className="text-[11px] leading-none opacity-55">
                                         {item.value}
                                     </span>
@@ -88,12 +101,12 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                 </SettingGroup>
                 <SettingGroup title={t("settingsPanels.video.seconds")} color={theme.node.muted}>
                     <div className="grid grid-cols-3 gap-2.5">
-                        {secondOptions.map((value) => (
+                        {activeSecondOptions.map((value) => (
                             <OptionPill key={value} selected={seconds === String(value)} theme={theme} onClick={() => onConfigChange("videoSeconds", String(value))}>
                                 {value}s
                             </OptionPill>
                         ))}
-                        <NumberInput value={seconds} min={1} max={20} theme={theme} onChange={(value) => onConfigChange("videoSeconds", value)} />
+                        <NumberInput value={seconds} min={durationRange.min} max={durationRange.max} theme={theme} onChange={(value) => onConfigChange("videoSeconds", value)} />
                     </div>
                 </SettingGroup>
             </div>
@@ -101,18 +114,21 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     );
 }
 
-export function videoResolutionLabel(value: string) {
+export function videoResolutionLabel(value: string, model?: string) {
+    if (model && isDreaminaModel(model, "video")) return dreaminaVideoResolutionLabel(normalizeDreaminaVideoResolution(value, model));
     return `${normalizeVideoResolutionValue(value)}p`;
 }
 
-export function videoSizeLabel(value: string) {
+export function videoSizeLabel(value: string, model?: string) {
+    if (model && isDreaminaModel(model, "video")) return normalizeDreaminaVideoSize(value);
     if (value === "adaptive" || value === "auto") return i18n.t("settingsPanels.video.adaptive");
     const size = normalizeVideoSizeValue(value);
     const option = sizeOptions.find((item) => item.value === size);
     return option ? i18n.t(`settingsPanels.video.sizes.${option.labelKey}`) : size;
 }
 
-export function videoSecondsLabel(value: string) {
+export function videoSecondsLabel(value: string, model?: string) {
+    if (model && isDreaminaModel(model, "video")) return `${normalizeDreaminaSeconds(value, model)}s`;
     if (String(value).trim() === "-1") return i18n.t("settingsPanels.video.smart");
     return `${value || "6"}s`;
 }
@@ -127,6 +143,45 @@ export function normalizeVideoResolutionValue(value: string) {
     if (value === "480p" || value === "low") return "480";
     if (value === "720p" || value === "auto" || value === "high" || value === "medium") return "720";
     return value.replace(/p$/i, "") || "720";
+}
+
+export function normalizeDreaminaVideoSize(size?: string) {
+    const aliases: Record<string, string> = { "1280x720": "16:9", "720x1280": "9:16", "1024x1024": "1:1", "1792x1024": "16:9", "1024x1792": "9:16" };
+    const value = aliases[size || ""] || size;
+    return dreaminaSizeOptions.some((item) => item.value === value) ? String(value) : "16:9";
+}
+
+export function normalizeDreaminaSeconds(value: string | undefined, model: string) {
+    const range = dreaminaVideoDurationRange(model);
+    return String(Math.max(range.min, Math.min(range.max, Math.floor(Number(value) || Math.max(5, range.min)))));
+}
+
+export function normalizeDreaminaVideoResolution(value: string | undefined, model: string) {
+    const normalized = `${value || "720"}`.toLowerCase().replace(/p$/, "");
+    const options = dreaminaVideoResolutionOptions(model);
+    return options.some((item) => item.value === normalized) ? normalized : options.some((item) => item.value === "720") ? "720" : options[0].value;
+}
+
+function dreaminaVideoResolutionOptions(model: string) {
+    const version = dreaminaModelVersion(model, "video");
+    const values = version === "seedance2.5" ? ["480", "720"] : version === "seedance2.0_vip" ? ["720", "1080", "4k"] : ["720"];
+    return values.map((value) => ({ value, label: dreaminaVideoResolutionLabel(value) }));
+}
+
+function dreaminaVideoResolutionLabel(value: string) {
+    return value === "4k" ? "4K" : `${value}p`;
+}
+
+function dreaminaVideoDurationRange(model: string) {
+    const version = dreaminaModelVersion(model, "video");
+    if (version === "seedance1.0fast") return { min: 5, max: 10 };
+    if (version === "seedance1.5pro") return { min: 5, max: 12 };
+    return { min: 4, max: version === "seedance2.5" ? 30 : 15 };
+}
+
+function dreaminaVideoSecondOptions(range: { min: number; max: number }) {
+    const preferred = [4, 5, 6, 8, 10, 12, 15, 20, 25, 30];
+    return preferred.filter((value) => value >= range.min && value <= range.max);
 }
 
 function OptionPill({ selected, disabled = false, theme, onClick, children }: { selected: boolean; disabled?: boolean; theme: CanvasTheme; onClick: () => void; children: ReactNode }) {

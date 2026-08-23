@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 
 import i18n from "@/i18n";
 import { type CanvasTheme } from "@/lib/canvas-theme";
-import type { AiConfig } from "@/stores/use-config-store";
+import { dreaminaModelVersion, isDreaminaModel, type AiConfig } from "@/stores/use-config-store";
 
 const qualityOptions = [
     { value: "auto", labelKey: "auto" },
@@ -30,6 +30,17 @@ const aspectOptions = [
     { value: "auto", label: "auto", width: 0, height: 0, icon: "auto" },
 ];
 
+const dreaminaAspectOptions = [
+    { value: "21:9", label: "21:9", width: 21, height: 9, icon: "landscape" },
+    { value: "16:9", label: "16:9", width: 16, height: 9, icon: "landscape" },
+    { value: "3:2", label: "3:2", width: 3, height: 2, icon: "landscape" },
+    { value: "4:3", label: "4:3", width: 4, height: 3, icon: "landscape" },
+    { value: "1:1", label: "1:1", width: 1, height: 1, icon: "square" },
+    { value: "3:4", label: "3:4", width: 3, height: 4, icon: "portrait" },
+    { value: "2:3", label: "2:3", width: 2, height: 3, icon: "portrait" },
+    { value: "9:16", label: "9:16", width: 9, height: 16, icon: "portrait" },
+];
+
 export const imageQualityOptions = qualityOptions.map((item) => ({ value: item.value, get label() { return i18n.t(`settingsPanels.common.${item.labelKey}`); } }));
 export const imageAspectOptions = aspectOptions.map((item) => ({ value: item.size || item.value, label: item.label }));
 
@@ -46,15 +57,19 @@ type ImageSettingsPanelProps = {
 export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = true, className = "w-[320px] space-y-4 rounded-2xl px-1 py-0.5", maxCount = 15, quickCount = 10 }: ImageSettingsPanelProps) {
     const { t } = useTranslation();
     const [snapDimensionToStep, setSnapDimensionToStep] = useState(true);
-    const quality = config.quality || "auto";
-    const count = Math.max(1, Math.min(maxCount, Math.floor(Math.abs(Number(config.count)) || 1)));
-    const activeSize = config.size || "auto";
+    const dreamina = isDreaminaModel(config.model, "image");
+    const activeQualityOptions = dreamina ? dreaminaImageQualityOptions(config.model) : qualityOptions;
+    const activeAspectOptions = dreamina ? dreaminaAspectOptions : aspectOptions;
+    const activeMaxCount = dreamina ? Math.min(maxCount, 10) : maxCount;
+    const quality = dreamina ? normalizeDreaminaImageResolution(config.quality, config.model) : config.quality || "auto";
+    const count = Math.max(1, Math.min(activeMaxCount, Math.floor(Math.abs(Number(config.count)) || 1)));
+    const activeSize = dreamina ? normalizeDreaminaImageSize(config.size) : config.size || "auto";
     const transparentBackground = config.background === "transparent";
-    const selectedAspect = aspectOptions.find((item) => (item.size || item.value) === activeSize || item.value === activeSize);
-    const dimensions = readSizeDimensions(activeSize, selectedAspect || aspectOptions[0]);
+    const selectedAspect = activeAspectOptions.find((item) => ("size" in item ? item.size || item.value : item.value) === activeSize || item.value === activeSize);
+    const dimensions = readSizeDimensions(activeSize, selectedAspect || activeAspectOptions[0]);
     const selectAspect = (value: string) => {
-        const option = aspectOptions.find((item) => item.value === value);
-        onConfigChange("size", option?.size || option?.value || "auto");
+        const option = activeAspectOptions.find((item) => item.value === value);
+        onConfigChange("size", option && "size" in option && typeof option.size === "string" ? option.size : option?.value || "auto");
     };
     const updateDimension = (key: "width" | "height", value: number | null) => {
         const next = Math.max(1, Math.floor(value || dimensions[key] || 1024));
@@ -78,14 +93,14 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
                 <div className="space-y-2.5">
                     <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.quality")}</SettingTitle>
                     <div className="grid grid-cols-4 gap-2.5">
-                        {qualityOptions.map((item) => (
+                        {activeQualityOptions.map((item) => (
                             <OptionPill key={item.value} selected={quality === item.value} theme={theme} onClick={() => onConfigChange("quality", item.value)}>
-                                {t(`settingsPanels.common.${item.labelKey}`)}
+                                {"label" in item ? item.label : t(`settingsPanels.common.${item.labelKey}`)}
                             </OptionPill>
                         ))}
                     </div>
                 </div>
-                <div className="space-y-2.5">
+                {dreamina ? null : <div className="space-y-2.5">
                     <div className="flex items-center justify-between gap-3">
                         <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.size")}</SettingTitle>
                         <div className="flex items-center gap-2">
@@ -102,11 +117,11 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
                         <span className="text-lg opacity-45">↔</span>
                         <DimensionInput prefix="H" value={dimensions.height} disabled={activeSize === "auto"} theme={theme} alignToStep={snapDimensionToStep} onChange={(value) => updateDimension("height", value)} />
                     </div>
-                </div>
+                </div>}
                 <div className="space-y-2.5">
                     <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.aspectRatio")}</SettingTitle>
                     <div className="grid grid-cols-4 gap-2.5">
-                        {aspectOptions.map((item) => (
+                        {activeAspectOptions.map((item) => (
                             <button
                                 key={item.value}
                                 type="button"
@@ -121,7 +136,7 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
                         ))}
                     </div>
                 </div>
-                <div className="flex items-center justify-between gap-3">
+                {dreamina ? null : <div className="flex items-center justify-between gap-3">
                     <div className="space-y-0.5">
                         <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.transparent")}</SettingTitle>
                         <div className="text-xs" style={{ color: theme.node.muted, opacity: 0.75 }}>
@@ -131,16 +146,16 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
                     <span onMouseDown={(event) => event.stopPropagation()}>
                         <Switch size="small" checked={transparentBackground} onChange={(checked) => onConfigChange("background", checked ? "transparent" : "")} />
                     </span>
-                </div>
+                </div>}
                 <div className="space-y-2.5">
                     <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.count")}</SettingTitle>
                     <div className="grid grid-cols-4 gap-2.5">
-                        {Array.from({ length: quickCount }, (_, index) => index + 1).map((value) => (
+                        {Array.from({ length: Math.min(quickCount, activeMaxCount) }, (_, index) => index + 1).map((value) => (
                             <OptionPill key={value} selected={count === value} theme={theme} onClick={() => onConfigChange("count", String(value))}>
                                 {t("settingsPanels.image.images", { count: value })}
                             </OptionPill>
                         ))}
-                        <CountInput value={count} max={maxCount} theme={theme} onChange={(value) => onConfigChange("count", String(value || 1))} />
+                        <CountInput value={count} max={activeMaxCount} theme={theme} onChange={(value) => onConfigChange("count", String(value || 1))} />
                     </div>
                 </div>
             </div>
@@ -161,12 +176,32 @@ export function ImageSettingsTheme({ theme, children }: { theme: CanvasTheme; ch
     );
 }
 
-export function imageQualityLabel(value: string) {
+export function imageQualityLabel(value: string, model?: string) {
+    if (model && isDreaminaModel(model, "image")) return normalizeDreaminaImageResolution(value, model).toUpperCase();
     return (["auto", "high", "medium", "low"].includes(value) ? i18n.t(`settingsPanels.common.${value}`) : value);
 }
 
-export function imageSizeLabel(size: string) {
+export function imageSizeLabel(size: string, model?: string) {
+    if (model && isDreaminaModel(model, "image")) return normalizeDreaminaImageSize(size);
     return aspectOptions.find((item) => (item.size || item.value) === size || item.value === size)?.label || size;
+}
+
+export function normalizeDreaminaImageSize(size?: string) {
+    return dreaminaAspectOptions.some((item) => item.value === size) ? String(size) : "1:1";
+}
+
+export function normalizeDreaminaImageResolution(value: string | undefined, model: string) {
+    const options = dreaminaImageQualityOptions(model);
+    const normalized = value?.toLowerCase();
+    if (normalized && options.some((item) => item.value === normalized)) return normalized;
+    if (normalized === "high") return options.at(-1)!.value;
+    return options.some((item) => item.value === "2k") ? "2k" : options[0].value;
+}
+
+function dreaminaImageQualityOptions(model: string) {
+    const version = dreaminaModelVersion(model, "image");
+    const values = version === "3.0" || version === "3.1" ? ["1k", "2k"] : version === "5.0Pro" ? ["1.5k", "2k", "4k"] : ["2k", "4k"];
+    return values.map((value) => ({ value, label: value.toUpperCase() }));
 }
 
 function OptionPill({ selected, theme, onClick, children }: { selected: boolean; theme: CanvasTheme; onClick: () => void; children: ReactNode }) {

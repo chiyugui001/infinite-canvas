@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import type { ServerResponse } from "node:http";
+import path from "node:path";
 
 import type { AgentAttachment } from "../agent/types.js";
 import { logger } from "../utils/logger.js";
@@ -24,6 +25,8 @@ export type ConversationState = {
 };
 type McpInventoryItem = { name: string; authStatus?: string };
 export const AGENT_PROTOCOL_VERSION = 6;
+
+const LOCAL_MEDIA_EXTENSIONS = new Set([".aac", ".avif", ".flac", ".gif", ".jpeg", ".jpg", ".m4a", ".m4v", ".mov", ".mp3", ".mp4", ".ogg", ".png", ".wav", ".webm", ".webp"]);
 
 const SITE_TOOLS = new Set<ToolName>([
     "site_navigate",
@@ -453,6 +456,7 @@ export class CanvasSession {
             return { nodes: (this.canvasState?.nodes || []).filter((node) => ids.has(node.id)).map(compactNode) };
         }
         if (name === "canvas_create_attachment_nodes") return await this.createAttachmentNodes(input as { attachmentIds: string[]; x?: number; y?: number; gap?: number; direction?: "row" | "column" });
+        if (name === "canvas_import_local_media") return await this.importLocalMedia(input as { paths: string[]; x?: number; y?: number; gap?: number; direction?: "row" | "column" });
         if (!this.clients.size) throw new Error("当前没有已连接画布");
         const request = buildCanvasToolRequest(name, input, this.canvasState);
         return await this.requestCanvasTool(request.name, request.input);
@@ -485,6 +489,31 @@ export class CanvasSession {
         return { nodes: nodes.map(({ id, attachmentId, title }) => ({ id, attachmentId, title })) };
     }
 
+    /** 将 Agent 生成或下载到本机的媒体文件交给网页导入。 */
+    private async importLocalMedia(input: { paths: string[]; x?: number; y?: number; gap?: number; direction?: "row" | "column" }) {
+        const clientId = this.targetClientId;
+        if (!this.clients.has(clientId) || !this.canvasState) throw new Error("当前没有已连接画布");
+        const paths = input.paths.map((filePath) => {
+            if (!path.isAbsolute(filePath)) throw new Error(`本地媒体必须使用绝对路径：${filePath}`);
+            return path.resolve(filePath);
+        });
+        paths.forEach((filePath) => {
+            if (!path.isAbsolute(filePath) || !LOCAL_MEDIA_EXTENSIONS.has(path.extname(filePath).toLowerCase())) throw new Error(`不支持的本地媒体文件：${filePath}`);
+        });
+        const x = Number(input.x ?? nextCanvasX(this.canvasState));
+        const y = Number(input.y ?? 0);
+        const gap = Number(input.gap ?? 40);
+        const direction = input.direction || "row";
+        const nodes = paths.map((filePath, index) => ({
+            id: `media-${crypto.randomUUID()}`,
+            path: filePath,
+            title: path.basename(filePath),
+            position: { x: direction === "row" ? x + index * (400 + gap) : x, y: direction === "column" ? y + index * (280 + gap) : y },
+        }));
+        await this.requestCanvasTool("canvas_import_local_media", { nodes });
+        return { nodes: nodes.map(({ id, path: filePath, title }) => ({ id, path: filePath, title })) };
+    }
+
     /** 向目标网页发送工具请求并等待调用结果。 */
     private async requestCanvasTool(name: ToolName, input: Record<string, unknown>) {
         const requestId = crypto.randomUUID();
@@ -498,7 +527,7 @@ export class CanvasSession {
                 this.pending.delete(requestId);
                 logger.warn("Canvas tool request timed out", { requestId, name, clientId });
                 reject(new Error("画布操作超时"));
-            }, 30000);
+            }, name === "canvas_import_local_media" ? 120000 : 30000);
             this.pending.set(requestId, { clientId, resolve: (value) => (clearTimeout(timer), resolve(value)), reject: (error) => (clearTimeout(timer), reject(error)) });
         });
     }

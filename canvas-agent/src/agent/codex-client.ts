@@ -6,6 +6,7 @@ import stripAnsi from "strip-ansi";
 
 import { VERSION } from "../config.js";
 import { logger } from "../utils/logger.js";
+import { withDreaminaPath } from "../integrations/dreamina.js";
 import { field, type JsonRecord } from "../utils/value.js";
 import { codexEventHistory, type CodexEventHistory } from "./codex-event-history.js";
 import type { CodexNotificationParams, CodexPlanUpdate, CodexReasoningEffort, CodexRequestMethod, CodexRequestParams, CodexRequestResult, CodexSkillSelector, CodexTurnInput } from "./codex-protocol.js";
@@ -68,7 +69,7 @@ export class CodexAppClient {
     /** 启动并初始化 Codex app-server。 */
     static async start(emit: AgentEmit, onExit: () => void) {
         logger.info("Starting Codex app-server", { executable: process.execPath, codex: codexBin() });
-        const child = spawn(process.execPath, [codexBin(), "app-server", "--stdio"], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+        const child = spawn(process.execPath, [codexBin(), "app-server", "--stdio"], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true, env: withDreaminaPath() });
         const client = new CodexAppClient(child, emit);
         let stopped = false;
         const stop = () => {

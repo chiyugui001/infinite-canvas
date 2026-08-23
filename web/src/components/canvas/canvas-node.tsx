@@ -8,7 +8,7 @@ import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { buildNodeContext } from "@/lib/canvas/plugin-node-context";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { CanvasResourceMentionTextarea } from "./canvas-resource-mention-textarea";
-import { CanvasNodeType, type CanvasNodeData, type CanvasNodeImage, type Position } from "@/types/canvas";
+import { CanvasNodeType, type CanvasDreaminaProgress, type CanvasNodeData, type CanvasNodeImage, type Position } from "@/types/canvas";
 import type { CanvasNodeContext, CanvasPluginHost } from "@/types/canvas-plugin";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { useTranslation } from "react-i18next";
@@ -429,7 +429,7 @@ export const CanvasNode = React.memo(function CanvasNode({
 function NodeContent(props: NodeContentRendererProps) {
     if (props.node.type === CanvasNodeType.Config && props.renderNodeContent) return props.renderNodeContent(props.node);
     if (props.isBatchRoot) return <ImageNodeContent {...props} />;
-    if (props.node.metadata?.status === "loading") return <LoadingContent theme={props.theme} />;
+    if (props.node.metadata?.status === "loading") return <LoadingContent node={props.node} theme={props.theme} />;
     if (props.node.metadata?.status === "error") return <ErrorContent node={props.node} theme={props.theme} onRetry={props.onRetry} />;
 
     const Renderer = nodeContentRenderers[props.node.type as CanvasNodeType];
@@ -471,12 +471,13 @@ function GroupNodeContent({ node, theme, groupChildCount }: NodeContentRendererP
     );
 }
 
-function LoadingContent({ theme }: Pick<NodeContentRendererProps, "theme">) {
+function LoadingContent({ node, theme }: Pick<NodeContentRendererProps, "node" | "theme">) {
     const { t } = useTranslation();
+    const progress = node.metadata?.dreaminaProgress;
     return (
-        <div className="flex h-full w-full flex-col items-center justify-center gap-3" style={{ color: theme.node.activeStroke }}>
+        <div className="flex h-full w-full flex-col items-center justify-center gap-3 px-5 text-center" style={{ color: theme.node.activeStroke }}>
             <div className="size-10 animate-spin rounded-full border-2" style={{ borderColor: theme.node.stroke, borderTopColor: theme.node.activeStroke }} />
-            <span className="text-[10px] tracking-[0.2em]">{t("canvas.node.generating")}</span>
+            {progress ? <DreaminaProgressDetails progress={progress} /> : <span className="text-[10px] tracking-[0.2em]">{t("canvas.node.generating")}</span>}
         </div>
     );
 }
@@ -790,9 +791,36 @@ function ImageSlotStatus({ image }: { image?: CanvasNodeImage }) {
     return (
         <div className="flex h-full w-full flex-col items-center justify-center gap-3 px-6 text-center" style={{ background: theme.node.fill, color: failed ? theme.node.text : theme.node.activeStroke }}>
             {failed ? <span className="text-xs leading-5">{image.errorDetails || t("canvas.node.failed")}</span> : <div className="size-10 animate-spin rounded-full border-2" style={{ borderColor: theme.node.stroke, borderTopColor: theme.node.activeStroke }} />}
-            {!failed ? <span className="text-[10px] tracking-[0.2em]">{t("canvas.node.generating")}</span> : null}
+            {!failed ? image?.dreaminaProgress ? <DreaminaProgressDetails progress={image.dreaminaProgress} compact /> : <span className="text-[10px] tracking-[0.2em]">{t("canvas.node.generating")}</span> : null}
         </div>
     );
+}
+
+function DreaminaProgressDetails({ progress, compact = false }: { progress: CanvasDreaminaProgress; compact?: boolean }) {
+    const { t } = useTranslation();
+    const phase = t(`canvas.node.dreamina.phases.${progress.phase}`);
+    const queue = progress.queueStatus ? t("canvas.node.dreamina.queueStatus", { status: progress.queueStatus }) : "";
+    const queuePosition = progress.phase === "queued" && progress.queueIndex !== undefined
+        ? t("canvas.node.dreamina.queuePosition", { position: progress.queueIndex + 1, total: progress.queueLength || "?" })
+        : "";
+    const detail = [t("canvas.node.dreamina.cliStatus", { status: progress.genStatus }), queue, queuePosition, t("canvas.node.dreamina.elapsed", { time: formatProgressDuration(progress.elapsedMs) })].filter(Boolean).join(" · ");
+    const hint = progress.phase === "awaiting_confirmation" ? t("canvas.node.dreamina.confirmationHint") : t(`canvas.node.dreamina.hints.${progress.phase}`);
+    return (
+        <div className="flex max-w-[290px] flex-col items-center gap-1.5">
+            <span className="text-xs font-semibold tracking-wide">{phase}</span>
+            {!compact || progress.phase === "awaiting_confirmation" ? <span className="text-[11px] leading-4 opacity-80">{hint}</span> : null}
+            <span className="text-[10px] leading-4 opacity-60">{detail}</span>
+        </div>
+    );
+}
+
+function formatProgressDuration(milliseconds: number) {
+    const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+    if (seconds < 60) return `${seconds}s`;
+    const minutes = Math.floor(seconds / 60);
+    const remaining = seconds % 60;
+    if (minutes < 60) return `${minutes}m ${remaining}s`;
+    return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
 
 function ImageInfoBar({ node }: { node: CanvasNodeData }) {

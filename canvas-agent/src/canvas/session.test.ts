@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
 import type { ServerResponse } from "node:http";
+import path from "node:path";
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -107,6 +108,34 @@ test("图片附件只允许发起 turn 的标签页读取和落入画布", async
     assert.throws(() => session.getTurnAttachment("second", "attachment-1"), /发起标签页/);
     assert.equal(first.event("tool_call"), undefined);
     assert.equal(second.event("tool_call"), undefined);
+});
+
+test("本地媒体只发送到当前 turn 绑定的画布", async (t) => {
+    const session = new CanvasSession();
+    const first = connect(session, "first");
+    const second = connect(session, "second");
+    t.after(() => {
+        first.close();
+        second.close();
+    });
+    session.updateState(snapshot("canvas-first"), "first");
+    session.updateState(snapshot("canvas-second"), "second");
+    session.bindClient("first");
+    const filePath = path.resolve("outputs", "dreamina.mp4");
+
+    const result = session.callTool("canvas_import_local_media", { paths: [filePath], x: 20, y: 30 });
+    const call = first.event("tool_call");
+    const input = field(call, "input") as Record<string, unknown>;
+    const nodes = input.nodes as Array<Record<string, unknown>>;
+    assert.equal(second.event("tool_call"), undefined);
+    assert.equal(field(call, "name"), "canvas_import_local_media");
+    assert.equal(nodes.length, 1);
+    assert.equal(nodes[0].path, filePath);
+    assert.equal(nodes[0].title, "dreamina.mp4");
+    assert.deepEqual(nodes[0].position, { x: 20, y: 30 });
+
+    session.resolveResult("first", { requestId: String(field(call, "requestId")), result: { ok: true } });
+    assert.equal(((await result) as { nodes: unknown[] }).nodes.length, 1);
 });
 
 test("tool result is accepted only from the request client", async (t) => {

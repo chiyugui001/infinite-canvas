@@ -155,3 +155,13 @@ claude mcp add --scope user --transport stdio infinite-canvas -- node /path/to/i
 ```
 
 Canvas Agent 调用 Claude Code 时会默认带上 `--allowedTools mcp__infinite-canvas__*`，画布写操作仍由网页侧边栏确认。
+
+## Dreamina（即梦）CLI
+
+Canvas Agent 会自动发现本机已安装的 `dreamina`，把 CLI 自带的 `dreamina-cli` Skill 加载到站点级 Codex 工作空间，并让侧边栏 Codex 可以直接调用当前 CLI。Windows 默认识别 `%USERPROFILE%\Documents\Codex\bin\dreamina.cmd`，也可以通过 `DREAMINA_CLI_PATH` 和 `DREAMINA_SKILL_PATH` 指定其他安装位置。
+
+只有用户明确要求使用即梦时才会切换到 CLI。真实生成会消耗即梦积分；任务成功后，Codex 可以使用 `canvas_import_local_media` 将 `query_result --download_dir` 下载的图片、视频或音频导入当前画布。登录凭据始终保留在 Dreamina CLI 自己的本地目录，不会传到网页。
+
+连接本地 Agent 后，生图、视频工作台和画布生成节点的模型选择器也会显示「即梦 Dreamina」本地渠道。选择后，浏览器通过带 token 的本地 Agent 接口调用 CLI；文生图、图生图、文生视频和单图生视频共用同一条下载与回填链路。每次真实任务提交前都会显示积分消耗确认，未确认时 Agent 也会拒绝执行。
+
+自动化测试不得调用真实生成命令。设置 `CANVAS_AGENT_DREAMINA_TEST_MODE=1` 后，Agent 仅返回本地合成的 SVG 测试图，不读取即梦积分、不提交任务，也不提供模拟视频；`npm test` 会验证测试模式没有启动 CLI。
